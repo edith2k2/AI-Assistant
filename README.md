@@ -67,4 +67,4 @@ This project is licensed under the MIT License.
 ## Contact
 
 - **Email**: blankmask@gmail.com
-- **GitHub**: [https://github.com/username/ai-assistant-notebook](https://github.com/username/ai-assistant-notebook)
+- **GitHub**: [https://github.com/edith2k2/AI-Assistant](https://github.com/username/AI-Assistant)
