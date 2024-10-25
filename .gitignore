@@ -1,0 +1,4 @@
+*.json
+*.env
+local_mode.ipynb
+.DS_Store
