@@ -1,4 +1,7 @@
 *.json
 *.env
+agent_supervisor.ipynb
 local_mode.ipynb
 .DS_Store
+*.pdf
+chroma_db
