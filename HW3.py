@@ -12,6 +12,7 @@ import builtins
 import operator
 from datetime import datetime, timedelta
 from email.message import EmailMessage
+import json
 
 # Third-party imports
 from typing import List, Optional, Dict, Union, Type, Any, Literal, TypedDict
@@ -51,14 +52,55 @@ from langgraph.graph import END, START, StateGraph, MessagesState
 from langgraph.prebuilt import ToolNode
 
 # Prompt toolkit related
-from prompt_toolkit import PromptSession
-from prompt_toolkit.formatted_text import HTML
+from prompt_toolkit.shortcuts import PromptSession
 from prompt_toolkit.styles import Style
-from prompt_toolkit.shortcuts import CompleteStyle
-
+from prompt_toolkit.formatted_text import HTML
+from prompt_toolkit.output import Output
+from prompt_toolkit.output.defaults import create_output
+from prompt_toolkit import print_formatted_text as print_formatted
+from prompt_toolkit.shortcuts import clear
 # Environment variables
 from dotenv import load_dotenv
 
+# rich library imports
+from rich.console import Console
+from rich.theme import Theme
+from rich.logging import RichHandler
+from rich.panel import Panel
+from rich.live import Live
+from rich.text import Text
+from rich.console import Group
+from rich._log_render import LogRender
+from rich.padding import Padding
+import shutil
+
+
+class Colors:
+    """ANSI color codes"""
+    BLACK = "\033[0;30m"
+    RED = "\033[0;31m"
+    GREEN = "\033[0;32m"
+    BROWN = "\033[0;33m"
+    BLUE = "\033[0;34m"
+    PURPLE = "\033[0;35m"
+    CYAN = "\033[0;36m"
+    LIGHT_GRAY = "\033[0;37m"
+    DARK_GRAY = "\033[1;30m"
+    LIGHT_RED = "\033[1;31m"
+    LIGHT_GREEN = "\033[1;32m"
+    YELLOW = "\033[1;33m"
+    LIGHT_BLUE = "\033[1;34m"
+    LIGHT_PURPLE = "\033[1;35m"
+    LIGHT_CYAN = "\033[1;36m"
+    LIGHT_WHITE = "\033[1;37m"
+    BOLD = "\033[1m"
+    FAINT = "\033[2m"
+    ITALIC = "\033[3m"
+    UNDERLINE = "\033[4m"
+    BLINK = "\033[5m"
+    NEGATIVE = "\033[7m"
+    CROSSED = "\033[9m"
+    END = "\033[0m"
 
 load_dotenv(override=True)  # This loads the .env file in the current directory
 
@@ -66,32 +108,108 @@ load_dotenv(override=True)  # This loads the .env file in the current directory
 api_key = os.getenv("ANTHROPIC_API_KEY")
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 if api_key is None:
-    raise ValueError("API key is not set. Please set the 'ANTHROPIC_API_KEY' environment variable in .env and unset any other previous environment key.")
-print(f"API key loaded successfully.")
+    raise ValueError(f"{Colors.RED}API key is not set. Please set the 'ANTHROPIC_API_KEY' environment variable in .env and unset any other previous environment key.{Colors.END}")
+print(f"{Colors.GREEN}API key loaded successfully.{Colors.END}")
+
+# Get terminal size
+terminal_width, terminal_height = shutil.get_terminal_size()
 
 # %%
+SCOPES = [
+    "https://mail.google.com/",
+    "https://www.googleapis.com/auth/calendar",
+    "https://www.googleapis.com/auth/calendar.events",
+    "https://www.googleapis.com/auth/calendar.readonly"
+]
 
-def stream_print(text: str, delay: float = 0.02, end: Optional[str] = None) -> None:
-    """Print text character by character with a delay.
+    
+# Create a custom theme for consistent styling
+custom_theme = Theme({
+    'info': 'cyan',
+    'warning': 'yellow',
+    'error': 'red',
+    'success': 'green',
+    'stream': 'bright_blue'
+})
+
+# Initialize Rich console
+console = Console(
+    theme=custom_theme,
+    soft_wrap=True,
+    markup=True
+)
+
+def stream_print(text: str, delay: float = 0.02, end: Optional[str] = None, color: str = Colors.LIGHT_WHITE) -> None:
+    """Print text with streaming effect and color.
     
     Args:
         text (str): The text to print
         delay (float): Delay between each character in seconds
-        end (str, optional): String to print at the end (default: None)
+        end (str, optional): String to print at the end
+        color (str): ANSI color code to use
     """
+    if not text:
+        return
+
+    sys.stdout.write(color)  # Set color
     for char in text:
         sys.stdout.write(char)
         sys.stdout.flush()
         time.sleep(delay)
+    sys.stdout.write(Colors.END)  # Reset color
+
     if end is not None:
         sys.stdout.write(end)
         sys.stdout.flush()
 
+def smart_output(text: str, color: str = Colors.LIGHT_WHITE, stream_threshold: int = 100) -> None:
+    """Smart output that decides between streaming and batch printing.
+    
+    Args:
+        text (str): Text to output
+        color (str): ANSI color code
+        stream_threshold (int): Character length threshold for streaming
+    """
+    if not text:
+        return
+
+    # For short responses or user interaction, use streaming
+    if len(text) < stream_threshold or any(marker in text.lower() for marker in 
+        ['processing', 'thinking', 'please wait', 'loading', '...']):
+        stream_print(text, color=color)
+        return
+
+    # For data-heavy content, use batch printing with progress indicator
+    segments = text.split('\n')
+    total_segments = len(segments)
+    
+    # Show processing indicator
+    stream_print("Processing output", color=Colors.LIGHT_PURPLE)
+    for _ in range(3):
+        sys.stdout.write(".")
+        sys.stdout.flush()
+        time.sleep(0.2)
+    print("\n")
+    
+    # Print content in visually distinct chunks
+    for i, segment in enumerate(segments, 1):
+        if segment.strip():  # Only process non-empty lines
+            if any(header in segment.lower() for header in ['subject:', 'body:', 'results:', 'summary:']):
+                # Headers get special formatting
+                print(f"{Colors.YELLOW}{segment.strip()}{Colors.END}")
+            else:
+                # Regular content
+                print(f"{color}{segment.strip()}{Colors.END}")
+            
+            # Add slight delay between major sections for readability
+            if i < total_segments and i % 5 == 0:
+                time.sleep(0.1)
+
 # Configure logging
 def setup_logger():
-    # Create a logger
+    """Configure logging with file handler only to avoid double printing"""
     logger = logging.getLogger('workflow_logger')
-    logger.setLevel(logging.DEBUG)  # Set the logging level
+    logger.setLevel(logging.DEBUG)
     
     # Remove all existing handlers
     for handler in logger.handlers[:]:
@@ -100,30 +218,57 @@ def setup_logger():
     # Create a file handler
     file_handler = logging.FileHandler('workflow.log', mode='w')
     file_handler.setLevel(logging.DEBUG)
+    file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    file_handler.setFormatter(file_formatter)
     
-    # Create a logging format
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    file_handler.setFormatter(formatter)
-    
-    # Add the file handler to the logger
+    # Add only file handler to avoid console duplication
     logger.addHandler(file_handler)
     
     # Prevent propagation to the root logger
     logger.propagate = False
     
-    # Optionally, add a null handler to stdout to suppress any unexpected output
-    # null_handler = logging.StreamHandler(sys.stdout)
-    # null_handler.setLevel(logging.CRITICAL + 1)  # Set to a level higher than any defined level
-    # logger.addHandler(null_handler)
-
+    # Suppress other loggers
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     
     return logger
 
+
 # Use the logger
 logger = setup_logger()
 
+
+
+
+def create_prompt_session():
+    """
+    Create a prompt session with a shadow placeholder that maintains scrollability.
+    """
+    # Define custom style with more contrasting colors
+    style = Style.from_dict({
+        'prompt': 'bold cyan',                    # The "You: " part
+        'placeholder': 'italic #666666',          # Placeholder text style
+        'continuation': 'gray',                   # Style for long input continuation
+        'bottom-toolbar': 'bg:#222222 #ffffff',   # Bottom toolbar style
+    })
+
+    # Create the session with proper configuration
+    session = PromptSession(
+        message=[('class:prompt', 'You: ')],
+        style=style,
+        placeholder='type your message or "help" for usage guide...',
+        enable_history_search=True,
+        mouse_support=True,
+        complete_while_typing=True,
+        wrap_lines=True,
+        # This ensures proper terminal handling
+        input_processors=None,
+        # Maintain scrollable history
+        multiline=False,
+        # Keep prompt at bottom
+        bottom_toolbar=HTML('<b>Ctrl+C</b> to cancel  <b>↑↓</b> for history  <b>Tab</b> to complete')
+    )
+    return session
 # %%
 
 
@@ -220,12 +365,12 @@ class PDFQASystem:
         """Add a PDF to the system"""
         # Check for duplicate
         if file_path in self.added_pdfs:
-            print(f"PDF '{file_path}' has already been added to the system.")
+            print(f"{Colors.YELLOW}PDF '{file_path}' has already been added to the system.{Colors.END}")
             return True
 
         # Validate PDF
         if not self.check_if_pdf_valid(file_path):
-            print(f"Error: '{file_path}' is not a valid PDF file or does not exist.")
+            print(f"{Colors.RED}Error: '{file_path}' is not a valid PDF file or does not exist.{Colors.END}")
             return False
 
         try:
@@ -258,11 +403,11 @@ class PDFQASystem:
                 return_source_documents=True
             )
             
-            print(f"Added {file_path} to the system.")
+            print(f"{Colors.LIGHT_GREEN}Added {file_path} to the system.{Colors.END}")
             return True
             
         except Exception as e:
-            print(f"Error adding PDF '{file_path}': {str(e)}")
+            print(f"{Colors.LIGHT_RED}Error adding PDF '{file_path}': {str(e)} {Colors.END}")
             return False
 
     def extract_pdf_paths(self, user_message: str) -> List[str]:
@@ -299,7 +444,7 @@ class PDFQASystem:
         if not self.added_pdfs:
             return {
                 "question": question,
-                "answer": "No documents have been added to the system yet.",
+                "answer": f"{Colors.YELLOW}No documents have been added to the system yet.{Colors.END}",
                 "source_documents": []
             }
             
@@ -334,7 +479,7 @@ class PDFQASystem:
                 "answer": f"Error processing query: {str(e)}",
                 "source_documents": []
             }
-            print(self.format_output(error_result))
+            stream_print(self.format_output(error_result), color=Colors.LIGHT_RED)
             return error_result
 
 
@@ -575,15 +720,21 @@ def ask_email_missing_fields(state: AgentState) -> AgentState:
         raise ValueError(f"Missing fields not found in state: {str(e)}")
 
     if 'to' in missing_fields:
-        recipient = builtins.input("Please provide the email address of the recipient: ")
+        sys.stdout.write(f"\n{Colors.YELLOW}Please provide the email address of the recipient:{Colors.END} ")
+        sys.stdout.flush()
+        recipient = input().strip()
         state['email']['to'] = recipient
 
     if 'subject' in missing_fields:
-        subject = builtins.input("Please provide a subject for the email: ")
+        sys.stdout.write(f"\n{Colors.YELLOW}Please provide a subject for the email:{Colors.END} ")
+        sys.stdout.flush()
+        subject = input().strip()
         state['email']['subject'] = subject
 
     if 'body' in missing_fields:
-        body = builtins.input("Please provide the content for the email body: ")
+        sys.stdout.write(f"\n{Colors.YELLOW}Please provide the content for the email body:{Colors.END} ")
+        sys.stdout.flush()
+        body = input().strip()
         state['email']['body'] = body
 
     if 'cc' in missing_fields:
@@ -697,11 +848,15 @@ def user_approval_and_changes(state: AgentState) -> AgentState:
     # print(f"Subject: {state['email'].get('subject', 'N/A')}")
     # print(f"Body: {state['email'].get('body', 'N/A')}")
     
-    approval = input("Do you approve this email? (yes/no): ").lower().strip()
+    sys.stdout.write(f"\n{Colors.YELLOW}Do you approve this email? (yes/no):{Colors.END} ")
+    sys.stdout.flush()
+    approval = input().lower().strip()
     state['approved'] = approval == 'yes'
     
     if not state['approved']:
-        changes = input("Please specify the changes needed or provide additional instructions: ")
+        sys.stdout.write(f"\n{Colors.YELLOW}Please specify the changes needed or provide additional instructions:{Colors.END} ")
+        sys.stdout.flush()
+        changes = input().strip()
         if 'additional_instructions' not in state['email']:
             state['email']['additional_instructions'] = ''
         state['email']['additional_instructions'] += f"\n{changes}" if state['email']['additional_instructions'] else changes
@@ -841,39 +996,78 @@ def format_search_response(state: AgentState) -> AgentState:
     search_chain = prompt | llm | parser
 
     try:
-        # Process search results
-        processed_response = search_chain.invoke({
-            "query": state['search']['query'],
-            "search_results": state['search']['search_results']
-        })
+        # Create a simpler prompt for the LLM to ensure consistent output
+        prompt_template = """
+        Based on the following search results, provide a comprehensive response.
+        
+        Query: {query}
+        Search Results: {search_results}
+        
+        Provide your response in the following JSON format:
+        {{
+            "answer": "your detailed answer here",
+            "confidence": 0.95,
+            "sources": ["source1", "source2"]
+        }}
+
+        Requirements:
+        1. The answer should be detailed and directly address the query
+        2. Confidence should be between 0 and 1
+        3. Include at least one source
+        4. Format the response as valid JSON
+        """
+
+        prompt = PromptTemplate(
+            template=prompt_template,
+            input_variables=["query", "search_results"]
+        )
+
+        # Call LLM with the prompt
+        raw_response = llm.invoke(prompt.format(
+            query=state['search']['query'],
+            search_results=state['search']['search_results']
+        ))
+
+        # Try to extract JSON from the response
+        content = raw_response.content if hasattr(raw_response, 'content') else str(raw_response)
+        
+        # Try to find JSON in the content
+        json_match = re.search(r'\{[\s\S]*\}', content)
+        if not json_match:
+            raise ValueError("No JSON found in response")
+            
+        json_str = json_match.group()
+        processed_response = json.loads(json_str)
 
         # Format final response
         state['search']['final_response'] = f"""
 Based on your query: "{state['search']['query']}"
 
-{processed_response.answer}
+{processed_response.get('answer', 'No answer found.')}
 
-Confidence: {processed_response.confidence:.2f}
+Confidence: {processed_response.get('confidence', 0.0):.2f}
 
-Sources: {', '.join(processed_response.sources)}
+Sources:
+{', '.join(processed_response.get('sources', ['No sources available']))}
 
 ---
 Note: This response was generated based on search results and may not be complete or fully accurate.
 Would you like to know more about any specific aspect?
 """
 
+    except json.JSONDecodeError as e:
+        logger.error(f"JSON parsing error: {str(e)}")
+        # Fallback to raw results
+        state['search']['final_response'] = (
+            f"I found some results but couldn't process them properly.\n\n"
+            f"Raw search results:\n{state['search']['search_results']}\n\n"
+            "Would you like to try reformulating your query?"
+        )
     except Exception as e:
-        logger.error(f"Error processing search results with LLM: {str(e)}")
-        # Add more detailed error information
-        error_details = f"""
-Error Type: {type(e).__name__}
-Error Message: {str(e)}
-        """
-        logger.debug(f"Detailed error information: {error_details}")
-        
+        logger.error(f"Error processing search results: {str(e)}")
         state['search']['final_response'] = (
             f"While I found some results, I encountered an error processing them.\n"
-            f"Here are the raw search results:\n\n{state['search']['search_results']}\n\n"
+            f"Raw search results:\n{state['search']['search_results']}\n\n"
             "Would you like to try reformulating your query?"
         )
 
@@ -938,14 +1132,14 @@ def validate_pdf(state: AgentState) -> AgentState:
     
     if not added_pdfs and not pdf_paths:
         state['pdf']['error'] = "No PDF file paths found in the message or database"
-        print("No PDF file paths found in the message or database")
+        print(f"{Colors.LIGHT_RED}No PDF file paths found in the message or database{Colors.END}")
         state['pdf']['question'] = state['user_message']
         state['pdf']['is_valid'] = False
         return state
     
     for pdf in pdf_paths:
         if not state['pdf']['qa_system'].check_if_pdf_valid(file_path=pdf):
-            print(f"{pdf} is not a valid PDF file")
+            print(f"{Colors.LIGHT_RED}{pdf} is not a valid PDF file{Colors.END}")
             state['pdf']['error'] = "{pdf} is not a valid PDF file"
             state['pdf']['question'] = state['user_message']
             state['pdf']['is_valid'] = False
@@ -1176,8 +1370,8 @@ class CreateGoogleCalendarEvent(GoogleCalendarBaseTool):
 
 
 credentials = get_gmail_credentials(
-token_file="../token.json",
-scopes=["https://www.googleapis.com/auth/calendar"],
+token_file="./token.json",
+scopes=SCOPES,
 client_secrets_file="./credentials.json",
 )
 
@@ -1270,15 +1464,20 @@ def ask_calendar_missing_fields(state: AgentState) -> AgentState:
     missing_fields = state['calendar'].missing_fields
 
     if 'summary' in missing_fields:
-        state['calendar'].summary = builtins.input("Please provide the name of the event: ")
+        sys.stdout.write(f"\n{Colors.YELLOW}Please provide the name of the event:{Colors.END} ")
+        sys.stdout.flush()
+        state['calendar'].summary = input().strip()
+
     
     if 'start_datetime' in missing_fields:
-        prompt = "Please provide the start date and time of the event (e.g. '2023-05-01 14:30', 'May 1 2:30 PM', or 'next Monday at 3pm'): "
-        state['calendar'].start_datetime = get_valid_datetime(prompt)
+        sys.stdout.write(f"\n{Colors.YELLOW}Please provide the start date and time of the event:{Colors.END} ")
+        sys.stdout.flush()
+        state['calendar'].start_datetime = get_valid_datetime("Start time (e.g. 'tomorrow 3pm', 'next Monday 2pm'): ")
 
     if 'end_datetime' in missing_fields:
-        prompt = "Please provide the end date and time of the event (e.g. '2023-05-01 14:30', 'May 1 2:30 PM', or 'next Monday at 3pm'): "
-        state['calendar'].end_datetime = get_valid_datetime(prompt)
+        sys.stdout.write(f"\n{Colors.YELLOW}Please provide the end date and time of the event:{Colors.END} ")
+        sys.stdout.flush()
+        state['calendar'].end_datetime = get_valid_datetime("End time (e.g. 'tomorrow 4pm', 'next Monday 3pm'): ")
 
     if 'location' in missing_fields:
         state['calendar'].location = builtins.input("Please provide the location of the event (or press Enter if none): ")
@@ -1402,11 +1601,11 @@ def check_private_info(state: AgentState) -> AgentState:
     logger.debug("Entering check_private_info function")
     message = state['user_message']
     if "<private>" in message.lower() or "<sensitive>" in message.lower() or "<confidential>" in message.lower():
-        print("Private data detected. Using local agent.")
+        print(f"{Colors.GREEN}Private data detected. Using local agent.{Colors.END}")
         state['contains_private_info'] = True
         return state
     if "<public>" in message.lower() or "<email>" in message.lower() or "<contact>" in message.lower():
-        print("Public data detected. Using public agent.")
+        print(f"{Colors.YELLOW}Public data detected. Using public agent.{Colors.END}")
         state['contains_private_info'] = False
         return state
     
@@ -1444,19 +1643,19 @@ def route_task(state: AgentState) -> AgentState:
     message = state['user_message']
     
     if "<pdf>" in message.lower() or "<document>" in message.lower(): 
-        print("PDF-related query detected. Using PDF agent.")
+        print(f"{Colors.GREEN}PDF-related query detected. Using PDF agent.{Colors.END}")
         state['task_type'] = TaskType(task="pdf", explanation="User message contains 'PDF' or 'document'")
         return state
     if "<email>" in message.lower() in message.lower():
-        print("Public query detected. Using public agent.")
+        print(f"{Colors.GREEN}Public query detected. Using public agent.{Colors.END}")
         state['task_type'] = TaskType(task="email", explanation="User message contains 'public', 'email', or 'contact'")
         return state
     if "<calendar>" in message.lower() or "<event>" in message.lower():
-        print("Calendar-related query detected. Using calendar agent.")
+        print(f"{Colors.GREEN}Calendar-related query detected. Using calendar agent.{Colors.END}")
         state['task_type'] = TaskType(task="calendar", explanation="User message contains 'calendar' or 'event'")
         return state
     if "<search>" in message.lower() or "<find>" in message.lower():
-        print("Search-related query detected. Using search agent.")
+        print(f"{Colors.GREEN}Search-related query detected. Using search agent.{Colors.END}")
         state['task_type'] = TaskType(task="search", explanation="User message contains 'search' or 'find'")
         return state
     
@@ -1481,7 +1680,8 @@ def route_task(state: AgentState) -> AgentState:
         try:
             logger.debug("Generating response from ChatOllama")
             result = structured_llm.invoke(prompt)
-            print(result)
+            # print(Colors.GREEN,result, Colors.END)
+            stream_print(f"Task type inferred: {result.task} explanation: {result.explanation}\n", color=Colors.GREEN)
             state['task_type'] = result
         except Exception as e:
             logger.error(f"Error in task routing: {str(e)}")
@@ -1617,131 +1817,156 @@ def get_random_response() -> str:
         "You're welcome! Ready for your next question!",
         "Thank you! Looking forward to helping you more!"
     ]
-    return random.choice(responses)
+    return f"{Colors.LIGHT_GREEN}{random.choice(responses)}{Colors.END}"
+
+# def format_step_output(step: dict) -> str:
+#     """Format the step output as plain text"""
+#     step_name = list(step.keys())[0]
+#     if step_name == 'end':
+#         return "\nWorkflow completed.\n"
+    
+#     state = step[step_name]
+#     output = ""
+    
+#     if state['task_type'] and state['task_type'].task == 'email':
+#         if step_name in ['draft_email', 'user_approval_and_changes'] and 'email' in state and state['email']:
+#             if 'subject' in state['email'] and 'body' in state['email']:
+#                 output = f"\nDraft Email:\nSubject: {state['email']['subject']}\n\nBody:\n{state['email']['body']}\n"
+            
+#         if step_name == 'send_email' and 'email' in state and state['email']:
+#             output = "\nEmail Sent Successfully\n"
+    
+#     elif state['task_type'] and state['task_type'].task == 'calendar':
+#         if 'calendar' in state and state['calendar']:
+#             output = f"\nCalendar Event:\n{state['calendar'].event_result}\n"
+    
+#     elif state['task_type'] and state['task_type'].task == 'search':
+#         if 'search' in state and state['search'] and state['search'].get('final_response'):
+#             output = f"\nSearch Results:\n{state['search']['final_response']}\n"
+    
+#     return output
 
 def format_step_output(step: dict) -> str:
-    """Format the step output for streaming display.
-    
-    Args:
-        step (dict): The step dictionary from the workflow
-        
-    Returns:
-        str: Formatted output string
-    """
+    """Format the step output as colored text"""
     step_name = list(step.keys())[0]
     if step_name == 'end':
-        return "Workflow completed.\n"
+        return f"\n{Colors.LIGHT_GREEN}Workflow completed.{Colors.END}\n"
     
     state = step[step_name]
+    output = ""
     
-    # Only print email draft during specific steps
     if state['task_type'] and state['task_type'].task == 'email':
-        if step_name in ['draft_email', 'user_approval_and_changes'] and 'email' in state and state['email']:
+        if step_name in ['draft_email'] and 'email' in state and state['email']:
             if 'subject' in state['email'] and 'body' in state['email']:
-                return f"\nDraft Email:\nSubject: {state['email']['subject']}\nBody: {state['email']['body']}\n"
+                output = f"""
+{Colors.LIGHT_CYAN}Draft Email:{Colors.END}
+{Colors.YELLOW}Subject:{Colors.END} {state['email']['subject']}
+
+{Colors.YELLOW}Body:{Colors.END}
+{state['email']['body']}\n"""
             
         if step_name == 'send_email' and 'email' in state and state['email']:
-            return f"\nEmail Sent Successfully\n"
+            output = f"\n{Colors.LIGHT_GREEN}Email Sent Successfully{Colors.END}\n"
     
     elif state['task_type'] and state['task_type'].task == 'calendar':
         if 'calendar' in state and state['calendar']:
-            return f"\nCreated Calendar Event:\n{state['calendar'].event_result}\n"
+            output = f"""
+{Colors.LIGHT_CYAN}Calendar Event:{Colors.END}
+{state['calendar'].event_result}\n"""
     
     elif state['task_type'] and state['task_type'].task == 'search':
         if 'search' in state and state['search'] and state['search'].get('final_response'):
-            return f"\nSearch Results:\n{state['search']['final_response']}\n"
-        
-    # elif state['task_type'] and state['task_type'].task == 'pdf':
-    #     if 'pdf' in state and state['pdf'] and state['pdf'].get('answer'):
-    #         return f"\nPDF Answer:\n{state['pdf']['answer']}\n"
-    
-    # Default minimal output
-    return f"Processed step: {step_name}...\n"
+            output = f"""
+{Colors.LIGHT_CYAN}Search Results:{Colors.END}
+{state['search']['final_response']}\n"""
+    smart_output(output, color=Colors.LIGHT_CYAN)
+    # return output
 
 # %%
 
 
 
 def create_prompt_session():
-    """Create and configure a PromptSession with custom styling and shadow effect"""
-    style = Style.from_dict({
-        'prompt': 'ansicyan bold',
-        # Shadow effect using a lighter gray and making it italic
-        'placeholder': '#666666 italic',
-        'shadow': 'bg:#444444',
-    })
+    """Create a prompt session with placeholder and proper scrolling"""
+    # Get terminal size
+    terminal_width, terminal_height = shutil.get_terminal_size()
     
+    # Define style
+    style = Style.from_dict({
+        'prompt': '#00aa00 bold',         # Green prompt
+        'placeholder': '#666666 italic',   # Gray italic placeholder
+        'bottom-toolbar': 'bg:#222222 #aaaaaa',  # Toolbar style
+        'output-field': 'bg:#000000 #ffffff',    # Output area style
+    })
+
+    # Create custom output
+    output = create_output(stdout=None)
+    
+    # Create session with scrolling support
     session = PromptSession(
-        message=[('class:prompt', 'You: ')],
+        message=HTML('<prompt>You: </prompt>'),
         style=style,
-        complete_style=CompleteStyle.MULTI_COLUMN,
-        complete_while_typing=True,
-        refresh_interval=0.1,  # Makes the interface more responsive
+        placeholder='type your message or "help" for usage guide...',
         enable_history_search=True,
-        wrap_lines=True
+        mouse_support=True,
+        wrap_lines=True,
+        complete_while_typing=True
     )
     return session
 
+
 def show_help():
-    """Display detailed help information about how to use the tool"""
-    help_text = """
-🔍 Help Guide
-================================
+    """Display help information with colors"""
+    help_text = f"""
+{Colors.LIGHT_CYAN}🔍 Help Guide
+================================{Colors.END}
 
 This assistant supports both natural language queries and command tags.
-Natural language queries may take a bit longer to process as they go through our LLM and may sometime be classified incorrectly.
-Using command tags can help speed up query processing, as they get processed directly.
+Natural language queries may take longer to process as they go through our LLM.
+Using command tags can help speed up query processing.
 
-⚠️ Caution: Using these tags will directly trigger specific system events/functions. 
-Make sure to use appropriate tags for your intended action.
-
-Available Tags:
+{Colors.YELLOW}Available Tags:{Colors.END}
 -----------
-1. Email Tasks: <email> 
-2. Calendar Tasks: <calendar> 
-3. PDF Tasks: <pdf>
-4. Search Tasks: <search>
+1. Email Tasks: {Colors.LIGHT_PURPLE}<email>{Colors.END} 
+2. Calendar Tasks: {Colors.LIGHT_PURPLE}<calendar>{Colors.END} 
+3. PDF Tasks: {Colors.LIGHT_PURPLE}<pdf>{Colors.END}
+4. Search Tasks: {Colors.LIGHT_PURPLE}<search>{Colors.END}
 
-Special Tags:
+{Colors.YELLOW}Special Tags:{Colors.END}
 ------------
-- <private> : Add this tag when handling sensitive information
-  Example: <email> <private> Draft a confidential email to HR
-- <public> : Add this tag for non-sensitive, shareable content
-  Example: <email> <public> Draft a newsletter announcement
+- {Colors.LIGHT_PURPLE}<private>{Colors.END} : Add this tag when handling sensitive information
+- {Colors.LIGHT_PURPLE}<public>{Colors.END} : Add this tag for non-sensitive content
 
-Example Tasks:
+{Colors.YELLOW}Example Tasks:{Colors.END}
 ------------
-Natural Language:
+{Colors.LIGHT_CYAN}Natural Language:{Colors.END}
 - "Send an email to my professor asking for a meeting"
 - "Search the internet for the latest AI research papers"
 - "Add a reminder for my dentist appointment next week"
 - "Tell me about Frontier in the PDF document"
 
-With Tags (Faster Processing):
-- <email> Draft a meeting request to Professor Smith for tomorrow
-- <search> Latest developments in artificial intelligence 2024
-- <calendar> Schedule team meeting every Monday at 10 AM
-- Tell me his work at NVIDIA <pdf>
-- <email>  Send salary details to HR <private>
-- <calendar> <public> Add company holiday party on December 20th
+{Colors.LIGHT_CYAN}With Tags (Faster Processing):{Colors.END}
+- {Colors.LIGHT_PURPLE}<email>{Colors.END} Draft a meeting request to Professor Smith
+- {Colors.LIGHT_PURPLE}<search>{Colors.END} Latest developments in AI 2024
+- {Colors.LIGHT_PURPLE}<calendar>{Colors.END} Schedule team meeting Monday 10 AM
+- {Colors.LIGHT_PURPLE}<pdf>{Colors.END} Analyze the annual report
 
-Additional Commands:
+{Colors.YELLOW}Additional Commands:{Colors.END}
 -----------------
-- help : Display this help message
-- quit : Exit the application
+- {Colors.LIGHT_GREEN}help{Colors.END} : Display this help menu
+- {Colors.LIGHT_GREEN}quit{Colors.END} : Exit the application
 
-
-Tips:
+{Colors.YELLOW}Tips:{Colors.END}
 ----
-- Be specific in your requests
-- You can combine tags: <email> <private> ...
-- Tags can be present anywhere in the message
+• Use Page Up/Down to scroll
+• Press 'q' to exit this help
+• Use Ctrl+C to cancel operations
 """
-    stream_print(help_text, delay=0.01)
+    with console.pager():
+        console.print(Panel(help_text, title="Help Guide", border_style="cyan"))
 
 def run_interactive_agent():
-    """Run the agent in an interactive loop with streaming output"""
-    # Initialize the state
+    """Run the agent with improved console output"""
     current_state = {
         "task_type": None,
         "contains_private_info": False,
@@ -1755,88 +1980,73 @@ def run_interactive_agent():
         "llm_state": LLMState()
     }
 
-    welcome_message = """
-Hello there, I am EDITH! I am your personal assistant.\n
-I can help you with various tasks like sending emails, scheduling events, extracting information from PDFs, and more!\n
+    welcome_message = f"""
+{Colors.LIGHT_CYAN}Welcome to EDITH! 🤖{Colors.END}
+I am your personal assistant and can help you with various tasks:
+{Colors.YELLOW}• Sending emails 📧
+• Scheduling events 📅
+• Extracting information from PDFs 📄
+• Web searches 🔍{Colors.END}
 
-Type 'help' for usage guide or start with a command (e.g., <email>, <calendar>, <search>)
-
-Waiting for your input...
+Type {Colors.LIGHT_GREEN}'help'{Colors.END} for usage guide or start with a command (e.g., {Colors.LIGHT_PURPLE}<email>{Colors.END}, {Colors.LIGHT_PURPLE}<calendar>{Colors.END}, {Colors.LIGHT_PURPLE}<search>{Colors.END})
 """
-    stream_print(welcome_message, delay=0.01)
-    session = create_prompt_session()
-
-    placeholder = (
-        " enter the message (or 'quit' to exit) "
-        "or 'help' for usage guide..."
-    )
-
+    stream_print(welcome_message)
+    
     while True:
-        # stream_print("\n", delay=0.01)
-        # user_input = input().strip()
-        user_input = session.prompt(
-                placeholder=placeholder,
-                pre_run=lambda: print('\033[2m', end=''),  # Dim effect start
-                rprompt='Press Ctrl+C to cancel',  # Right-side prompt
-                mouse_support=True,
-                default='',
-            ).strip()
-        
-        print('\033[0m', end='')
-        
-        if user_input.lower() in ['quit', 'exit', 'bye']:
-            stream_print("Sorry to see you go. Anyways, have a great time!", delay=0.02, end="\n\n")
-            break
-        if user_input.lower() == 'help':
+        try:
+            # Simple input prompt
+            sys.stdout.write(f"\n{Colors.CYAN}You: {Colors.END}")
+            sys.stdout.flush()
+            user_input = input().strip()
+            
+            if user_input.lower() in ['quit', 'exit', 'bye']:
+                stream_print(f"\n{Colors.GREEN}Goodbye! Have a great day! {Colors.END}👋\n")
+                break
+                
+            if user_input.lower() == 'help':
                 show_help()
                 continue
 
-        # Handle positive feedback
-        if is_positive_feedback(user_input):
-            response = get_random_response()
-            stream_print(response, delay=0.02, end="\n")
-            continue
-        
-        
-        if not user_input:
-            stream_print("Please enter a valid input or type 'quit' to exit.", delay=0.02, end="\n")
-            continue
+            if is_positive_feedback(user_input):
+                response = get_random_response()
+                stream_print(f"\n{response}\n")
+                continue
+            
+            if not user_input:
+                stream_print("\nPlease enter a valid input.\n")
+                continue
 
-        try:
-            # Update the state with new user message
-            current_state = {
-                **current_state,
+            # Update state
+            current_state.update({
                 "user_message": user_input,
                 "task_type": None,
                 "approved": False,
                 "changes_requested": []
-            }
-            
-            # Reset specific task states based on detected task type
-            if "<email>" in user_input.lower():
-                current_state["email"] = None
-            elif "<calendar>" in user_input.lower():
-                current_state["calendar"] = None
-            elif "<search>" in user_input.lower():
-                current_state["search"] = None
+            })
 
-            stream_print("\nProcessing your request...", delay=0.02, end="\n")
+            # Reset task states
+            for task_type in ['email', 'calendar', 'search']:
+                if f"<{task_type}>" in user_input.lower():
+                    current_state[task_type] = None
+
+            stream_print("\nProcessing your request...\n", color=Colors.PURPLE)
+            
+            # Process steps
             last_step_name = None
-            # Stream the execution steps
             for step in app.stream(current_state):
                 step_name = list(step.keys())[0]
-                if step_name != last_step_name:  # Only print if it's a new step
-                    output = format_step_output(step)
-                    if output:
-                        stream_print(output)
+                if step_name != last_step_name:
+                    # output = format_step_output(step)
+                    # if output:
+                    #     stream_print(output)
+                    format_step_output(step)
                     last_step_name = step_name
 
         except KeyboardInterrupt:
-            stream_print("\nOperation cancelled by user.", delay=0.02, end="\n")
+            stream_print("\nOperation cancelled.\n", color=Colors.LIGHT_RED)
             continue
         except Exception as e:
-            stream_print(f"\nAn error occurred: {str(e)}", delay=0.02, end="\n")
-            stream_print("Please try again with a different input.", delay=0.02, end="\n")
+            stream_print(f"\nError: {str(e)}\n")
             continue
 
 def stream_user_input(prompt: str = "") -> str:
