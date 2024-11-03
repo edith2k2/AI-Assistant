@@ -1,13 +1,37 @@
-composio_langchain==0.5.36
-langchain==0.3.4
-langchain_anthropic==0.2.3
-langchain_chroma==0.1.4
-langchain_community==0.3.3
-langchain_core==0.3.13
-langchain_google_community==2.0.1
-langchain_huggingface==0.1.0
-langchain_ollama==0.2.0
-langgraph==0.2.39
-ollama==0.3.3
-prompt_toolkit==3.0.48
-python-dotenv==1.0.1
+# Core dependencies
+pydantic>=2.9.2
+typing-extensions>=4.12.2
+
+# Date handling
+python-dateutil>=2.9.0
+pytz>=2024.2
+dateparser>=1.2.0
+
+# Google API
+google-auth>=2.35.0
+google-auth-oauthlib>=1.2.1
+google-api-python-client>=2.151.0
+
+# LangChain ecosystem
+langchain>=0.3.4
+langchain-anthropic>=0.2.3
+langchain-ollama>=0.2.0
+langchain-community>=0.3.3
+langchain-core>=0.3.13
+langchain-huggingface>=0.1.0
+langgraph>=0.2.39
+
+# Vector stores and embeddings
+faiss-cpu>=1.9.0
+
+# Document processing
+pypdf>=5.1.0
+
+# Search
+duckduckgo-search>=6.3.3
+
+# CLI Interface
+prompt_toolkit>=3.0.48
+
+# Environment variables
+python-dotenv>=1.0.1
