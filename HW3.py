@@ -1922,17 +1922,26 @@ def format_step_output(step: dict) -> str:
     """Format the step output as colored text"""
     step_name = list(step.keys())[0]
     if step_name == 'END':
-        return f"\n{Colors.LIGHT_GREEN}Workflow completed.{Colors.END}\n"
+        stream_print(f"\n{Colors.LIGHT_GREEN}Workflow completed.{Colors.END}\n")
+        return 
     
     state = step[step_name]
     output = f"{Colors.LIGHT_PURPLE}Processing step {step_name}... {Colors.END}\n"
     if step_name == 'check_calendar_fields' or step_name == 'ask_calendar_missing_fields' or step_name == "calendar_approval_and_changes":
-        return output
+        return 
     
-    if step_name == "route_task":
-        output += f"""{Colors.LIGHT_CYAN}Task Type Inferred:{Colors.END} {state['task_type'].task}\n
-        {Colors.LIGHT_CYAN}Explanation:{Colors.END} {state['task_type'].explanation}\n"""
-        return output
+    if step_name == "route_task" and state and state['task_type']:
+        output += f"""{Colors.LIGHT_CYAN}Task Type Inferred:{Colors.END} {state['task_type'].task}\n{Colors.LIGHT_CYAN}Explanation:{Colors.END} {state['task_type'].explanation}\n"""
+        stream_print(output)
+        return 
+    
+    if step_name == "check_private":
+        if state['contains_private_info']:
+            output += f"{Colors.LIGHT_RED}Private Information Detected{Colors.END}\n"
+        else:
+            output += f"{Colors.LIGHT_CYAN}No Private Information Detected{Colors.END}\n"
+        stream_print(output)
+        return
 
     if state['task_type'] and state['task_type'].task == 'email':
         if step_name in ['draft_email'] and 'email' in state and state['email']:
