@@ -5,3 +5,4 @@ local_mode.ipynb
 .DS_Store
 *.pdf
 chroma_db
+*.log

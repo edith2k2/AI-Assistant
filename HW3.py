@@ -116,7 +116,6 @@ terminal_width, terminal_height = shutil.get_terminal_size()
 
 # %%
 SCOPES = [
-    "https://mail.google.com/",
     "https://www.googleapis.com/auth/calendar",
     "https://www.googleapis.com/auth/calendar.events",
     "https://www.googleapis.com/auth/calendar.readonly"
@@ -178,6 +177,7 @@ def smart_output(text: str, color: str = Colors.LIGHT_WHITE, stream_threshold: i
         ['processing', 'thinking', 'please wait', 'loading', '...']):
         stream_print(text, color=color)
         return
+    print("smart output")
 
     # For data-heavy content, use batch printing with progress indicator
     segments = text.split('\n')
@@ -470,7 +470,7 @@ class PDFQASystem:
             }
             
             # print(self.format_output(formatted_result))
-            stream_print(self.format_output(formatted_result))
+            stream_print(self.format_output(formatted_result), color=Colors.CYAN)
             return formatted_result
             
         except Exception as e:
@@ -545,6 +545,10 @@ class CalendarState(BaseModel):
         description="A list of field names that are required but currently missing or empty"
     )
 
+    changes_requested: List[str] = Field(
+        default_factory=list,
+        description="A list of changes requested by the user"
+    )
     error: Optional[str] = Field(
         default=None,
         description="Error message if any error occurred during event creation"
@@ -648,13 +652,13 @@ def parse_email_response(response: str) -> dict:
 # %%
 # email functions 
 
-def get_gmail_service():
+def build_gmail_service():
     logger.debug("Getting Gmail service.")
     creds = None
     # The file token.pickle stores the user's access and refresh tokens, and is
     # created automatically when the authorization flow completes for the first time.
-    if os.path.exists('token.pickle'):
-        with open('token.pickle', 'rb') as token:
+    if os.path.exists('email_token.json'):
+        with open('email_token.json', 'rb') as token:
             creds = pickle.load(token)
     
     # If there are no (valid) credentials available, let the user log in.
@@ -668,11 +672,11 @@ def get_gmail_service():
         
         if not creds:
             flow = InstalledAppFlow.from_client_secrets_file(
-                'credentials.json', SCOPES)
+                'credentials.json', ["https://mail.google.com/"])
             creds = flow.run_local_server(port=0)
         
         # Save the credentials for the next run
-        with open('token.pickle', 'wb') as token:
+        with open('email_token.json', 'wb') as token:
             pickle.dump(creds, token)
     logger.debug("Gmail service obtained successfully.")
 
@@ -811,7 +815,7 @@ Remember, only include the SUBJECT and BODY, nothing else.
 
 def send_email_node(state: AgentState) -> AgentState:
     logger.debug("Sending email.")
-    service = get_gmail_service()
+    service = build_gmail_service()
     message = EmailMessage()
     
     # Assuming the email content is stored in the state
@@ -893,38 +897,6 @@ def internet_search(state: AgentState) -> AgentState:
         state['changes_requested'].append(f"Search error: {str(e)}")
     
     return state
-
-# def format_search_response(state: AgentState) -> AgentState:
-#     """
-#     Format the search results into a coherent response
-#     """
-#     if state['search'] is None:
-#         state['search'] = SearchState(
-#             query="",
-#             search_results=None,
-#             final_response="Error: No search state found",
-#             error="No search state initialized"
-#         )
-#         return state
-
-#     if state['search']['error']:
-#         state['search']['final_response'] = (
-#             f"I encountered an error while searching: {state['search']['error']}\n"
-#             "Would you like to try a different search query?"
-#         )
-#     elif state['search']['search_results']:
-#         state['search']['final_response'] = (
-#             f"Here's what I found for your query:\n\n"
-#             f"{state['search']['search_results']}"
-#         )
-#     else:
-#         state['search']['final_response'] = (
-#             "I couldn't find any results for your query. "
-#             "Would you like to try a different search term?"
-#         )
-
-#     return state
-
 
 class SearchResponse(BaseModel):
     answer: str = Field(description="The main answer synthesized from search results")
@@ -1369,22 +1341,68 @@ class CreateGoogleCalendarEvent(GoogleCalendarBaseTool):
         raise NotImplementedError("Async version of this tool is not implemented.")
 
 
-credentials = get_gmail_credentials(
-token_file="./token.json",
-scopes=SCOPES,
-client_secrets_file="./credentials.json",
+def get_calendar_credentials(
+    token_file: str,
+    scopes: list,
+    client_secrets_file: str
+) -> Credentials:
+    """
+    Get or create Calendar credentials
+    """
+    creds = None
+    
+    # If token pickle exists, load it
+    if os.path.exists(token_file):
+        with open(token_file, 'rb') as token:
+            creds = pickle.load(token)
+    
+    # If no valid credentials available, create them
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file(
+                client_secrets_file, scopes)
+            creds = flow.run_local_server(port=0)
+            
+        # Save credentials for future use
+        with open(token_file, 'wb') as token:
+            pickle.dump(creds, token)
+            
+    return creds
+
+def build_calendar_service(credentials: Credentials):
+    """
+    Build and return the Calendar service
+    """
+    return build('calendar', 'v3', credentials=credentials)
+
+# Usage:
+SCOPES = ['https://www.googleapis.com/auth/calendar']
+
+# Get credentials
+credentials = get_calendar_credentials(
+    token_file="./calendar_token.json",
+    scopes=SCOPES,
+    client_secrets_file="./credentials.json"
 )
 
-calendar_service = build_resource_service(credentials=credentials, service_name='calendar', service_version='v3')
-    
+calendar_service = build_calendar_service(credentials)
+
 createeventtool = CreateGoogleCalendarEvent.from_api_resource(calendar_service)
 
 # %%
 # calendar functions
+class CalendarResponse(BaseModel):
+    event: str = Field(description="Title of event")
+    start: str = Field(description="Start time of event")
+    end: str = Field(description="End time of event")
+    location: Optional[str] = Field(description="Location of event")
+    description: Optional[str] = Field(description="Description of event")
 
-def get_valid_datetime(prompt):
+def get_valid_datetime():
     while True:
-        start_datetime_str = builtins.input(prompt)
+        start_datetime_str = builtins.input()
         try:
             # Use dateparser to parse the input string
             settings = {
@@ -1470,14 +1488,14 @@ def ask_calendar_missing_fields(state: AgentState) -> AgentState:
 
     
     if 'start_datetime' in missing_fields:
-        sys.stdout.write(f"\n{Colors.YELLOW}Please provide the start date and time of the event:{Colors.END} ")
+        sys.stdout.write(f"\n{Colors.YELLOW}Please provide the start date and time of the event{Colors.END} (e.g. 'tomorrow 3pm', 'next Monday 2pm'):")
         sys.stdout.flush()
-        state['calendar'].start_datetime = get_valid_datetime("Start time (e.g. 'tomorrow 3pm', 'next Monday 2pm'): ")
+        state['calendar'].start_datetime = get_valid_datetime()
 
     if 'end_datetime' in missing_fields:
-        sys.stdout.write(f"\n{Colors.YELLOW}Please provide the end date and time of the event:{Colors.END} ")
+        sys.stdout.write(f"\n{Colors.YELLOW}Please provide the end date and time of the event{Colors.END} (e.g. 'tomorrow 4pm', 'next Monday 3pm'):")
         sys.stdout.flush()
-        state['calendar'].end_datetime = get_valid_datetime("End time (e.g. 'tomorrow 4pm', 'next Monday 3pm'): ")
+        state['calendar'].end_datetime = get_valid_datetime()
 
     if 'location' in missing_fields:
         state['calendar'].location = builtins.input("Please provide the location of the event (or press Enter if none): ")
@@ -1491,6 +1509,86 @@ def ask_calendar_missing_fields(state: AgentState) -> AgentState:
     logger.debug(f"Updated calendar state after asking for missing fields: {state['calendar']}")
     return state
 
+
+def draft_calendar_event(state: AgentState) -> AgentState:
+    logger.debug("Drafting calendar event.")
+    if state['calendar'] is None:
+        raise ValueError("Calendar state is not initialized")
+    
+    llm = state['llm_state'].get_llm(is_private=state['contains_private_info'])
+    # llm = ChatOllama(model="llama3.2")
+
+    parser = PydanticOutputParser(pydantic_object=CalendarResponse)
+    # Prepare the prompt for ChatOllama
+    calendar_prompt_template = """ 
+You are creating a calendar event. Use the following information:
+Event: {summary}
+Start: {start_datetime}
+End: {end_datetime}
+Location: {location}
+Description: {description}
+
+additional_instructions: {changes}
+
+format insructions: {format_instructions}
+"""
+    prompt = PromptTemplate(
+        template=calendar_prompt_template,
+        input_variables=["summary", "start_datetime", "end_datetime", "location", "description", "changes"],
+        partial_variables={
+            "format_instructions": parser.get_format_instructions()
+            }
+    )
+    
+    calendar_chain = prompt | llm | parser
+    try:
+        logger.debug("Invoking LLM for drafting calendar event.")
+        response = calendar_chain.invoke({
+            "summary": state['calendar'].summary,
+            "start_datetime": state['calendar'].start_datetime,
+            "end_datetime": state['calendar'].end_datetime,
+            "location": state['calendar'].location,
+            "description": state['calendar'].description,
+            "changes": ",".join(state['calendar'].changes_requested)
+        })
+        state['calendar'].summary = response.event
+        state['calendar'].start_datetime = response.start
+        state['calendar'].end_datetime = response.end
+        state['calendar'].location = response.location
+        state['calendar'].description = response.description
+        logger.debug("Calendar event drafted successfully.{state['calendar']}")
+    except Exception as e:
+        state['calendar'].error = f"Error drafting calendar event: {str(e)}"
+        state['changes_requested'].append(state['calendar'].error)
+    
+    return state
+
+def calendar_approval_and_changes(state: AgentState) -> AgentState:
+    logger.debug("calendar changes")
+    if state['calendar'] is None:
+        raise ValueError("Calendar state is not properly initialized")
+    sys.stdout.write(f""" \n{Colors.LIGHT_CYAN}
+Event: {state['calendar'].summary}
+Start: {state['calendar'].start_datetime}
+End: {state['calendar'].end_datetime}
+Location: {state['calendar'].location}
+Description: {state['calendar'].description}
+{Colors.END}
+""")
+    sys.stdout.flush()
+    sys.stdout.write(f"\n{Colors.YELLOW}Do you approve this event? (yes/no):{Colors.END} ")
+    sys.stdout.flush()
+    approval = input().lower().strip()
+    state['approved'] = approval == 'yes'
+
+    if not state['approved']:
+        sys.stdout.write(f"\n{Colors.YELLOW}Please specify the changes needed or provide additional instructions:{Colors.END} ")
+        sys.stdout.flush()
+        changes = input().strip()
+        if 'changes_requested' not in state['calendar']:
+            state['calendar'].changes_requested = []
+        state['calendar'].changes_requested.append(changes)
+    return state
 
 def create_calendar_event(state: AgentState) -> AgentState:
     """Create a calendar event with proper handling of unknown values and timezone awareness"""
@@ -1564,17 +1662,6 @@ def create_calendar_event(state: AgentState) -> AgentState:
             tool_input["location"] = location
         if description:
             tool_input["description"] = description
-
-        # Print event details for review
-        # print("\nCreating calendar event with the following details:")
-        # print(f"Summary: {summary}")
-        # print(f"Start: {start_datetime.strftime('%Y-%m-%d %I:%M %p %Z')}")
-        # print(f"End: {end_datetime.strftime('%Y-%m-%d %I:%M %p %Z')}")
-        # if location:
-        #     print(f"Location: {location}")
-        # if description:
-        #     print(f"Description: {description}")
-        # print(f"Timezone: {timezone}")
 
         # Create the event
         event_result = createeventtool.run(tool_input)
@@ -1681,7 +1768,7 @@ def route_task(state: AgentState) -> AgentState:
             logger.debug("Generating response from ChatOllama")
             result = structured_llm.invoke(prompt)
             # print(Colors.GREEN,result, Colors.END)
-            stream_print(f"Task type inferred: {result.task} explanation: {result.explanation}\n", color=Colors.GREEN)
+            # stream_print(f"Task type inferred: {result.task} explanation: {result.explanation}\n", color=Colors.GREEN)
             state['task_type'] = result
         except Exception as e:
             logger.error(f"Error in task routing: {str(e)}")
@@ -1716,6 +1803,8 @@ workflow.add_node("send_email", send_email_node)
 # Calendar nodes
 workflow.add_node("check_calendar_fields", check_calendar_missing_fields)
 workflow.add_node("ask_calendar_missing_fields", ask_calendar_missing_fields)
+workflow.add_node("calendar_approval_and_changes", calendar_approval_and_changes)
+workflow.add_node("draft_event", draft_calendar_event)
 workflow.add_node("create_event", create_calendar_event)
 
 # PDF nodes
@@ -1775,13 +1864,23 @@ workflow.add_edge("send_email", END)
 # Calendar workflow edges
 workflow.add_conditional_edges(
     "check_calendar_fields",
-    lambda x: "ask_missing_fields" if x['calendar'].missing_fields else "create_event",
+    lambda x: "ask_missing_fields" if x['calendar'].missing_fields else "calendar_approval_and_changes",
     {
         "ask_missing_fields": "ask_calendar_missing_fields",
-        "create_event": "create_event"
+        "calendar_approval_and_changes": "calendar_approval_and_changes"
     }
 )
-workflow.add_edge("ask_calendar_missing_fields", "create_event")
+# workflow.add_edge("ask_calendar_missing_fields", "create_event")
+workflow.add_edge("ask_calendar_missing_fields", "draft_event")
+workflow.add_edge("draft_event", "calendar_approval_and_changes")
+workflow.add_conditional_edges(
+    "calendar_approval_and_changes",
+    lambda x: "create" if x['approved'] else "calendar_approval_and_changes",
+    {
+        "create": "create_event",
+        "calendar_approval_and_changes": "draft_event"
+    }
+)
 workflow.add_edge("create_event", END)
 
 # Compile the workflow
@@ -1819,46 +1918,26 @@ def get_random_response() -> str:
     ]
     return f"{Colors.LIGHT_GREEN}{random.choice(responses)}{Colors.END}"
 
-# def format_step_output(step: dict) -> str:
-#     """Format the step output as plain text"""
-#     step_name = list(step.keys())[0]
-#     if step_name == 'end':
-#         return "\nWorkflow completed.\n"
-    
-#     state = step[step_name]
-#     output = ""
-    
-#     if state['task_type'] and state['task_type'].task == 'email':
-#         if step_name in ['draft_email', 'user_approval_and_changes'] and 'email' in state and state['email']:
-#             if 'subject' in state['email'] and 'body' in state['email']:
-#                 output = f"\nDraft Email:\nSubject: {state['email']['subject']}\n\nBody:\n{state['email']['body']}\n"
-            
-#         if step_name == 'send_email' and 'email' in state and state['email']:
-#             output = "\nEmail Sent Successfully\n"
-    
-#     elif state['task_type'] and state['task_type'].task == 'calendar':
-#         if 'calendar' in state and state['calendar']:
-#             output = f"\nCalendar Event:\n{state['calendar'].event_result}\n"
-    
-#     elif state['task_type'] and state['task_type'].task == 'search':
-#         if 'search' in state and state['search'] and state['search'].get('final_response'):
-#             output = f"\nSearch Results:\n{state['search']['final_response']}\n"
-    
-#     return output
-
 def format_step_output(step: dict) -> str:
     """Format the step output as colored text"""
     step_name = list(step.keys())[0]
-    if step_name == 'end':
+    if step_name == 'END':
         return f"\n{Colors.LIGHT_GREEN}Workflow completed.{Colors.END}\n"
     
     state = step[step_name]
-    output = ""
+    output = f"{Colors.LIGHT_PURPLE}Processing step {step_name}... {Colors.END}\n"
+    if step_name == 'check_calendar_fields' or step_name == 'ask_calendar_missing_fields' or step_name == "calendar_approval_and_changes":
+        return output
     
+    if step_name == "route_task":
+        output += f"""{Colors.LIGHT_CYAN}Task Type Inferred:{Colors.END} {state['task_type'].task}\n
+        {Colors.LIGHT_CYAN}Explanation:{Colors.END} {state['task_type'].explanation}\n"""
+        return output
+
     if state['task_type'] and state['task_type'].task == 'email':
         if step_name in ['draft_email'] and 'email' in state and state['email']:
             if 'subject' in state['email'] and 'body' in state['email']:
-                output = f"""
+                output += f"""
 {Colors.LIGHT_CYAN}Draft Email:{Colors.END}
 {Colors.YELLOW}Subject:{Colors.END} {state['email']['subject']}
 
@@ -1866,21 +1945,35 @@ def format_step_output(step: dict) -> str:
 {state['email']['body']}\n"""
             
         if step_name == 'send_email' and 'email' in state and state['email']:
-            output = f"\n{Colors.LIGHT_GREEN}Email Sent Successfully{Colors.END}\n"
+            output += f"\n{Colors.LIGHT_GREEN}Email Sent Successfully{Colors.END}\n"
     
     elif state['task_type'] and state['task_type'].task == 'calendar':
-        if 'calendar' in state and state['calendar']:
-            output = f"""
-{Colors.LIGHT_CYAN}Calendar Event:{Colors.END}
-{state['calendar'].event_result}\n"""
-    
+        if 'calendar' in state and state['calendar'] and state['calendar'].error is None and state['calendar'].event_result is None:
+#             output = f"""
+# {Colors.LIGHT_CYAN}Calendar Event:{Colors.END}
+# {state['calendar'].event_result}\n"""
+            output += f""" {Colors.LIGHT_CYAN}
+Event: {state['calendar'].summary}
+Start: {state['calendar'].start_datetime}
+End: {state['calendar'].end_datetime}
+Location: {state['calendar'].location}
+Description: {state['calendar'].description}
+{Colors.END}
+"""
+        elif 'calendar' in state and state['calendar'] and state['calendar'].event_result:
+            output += f"{Colors.LIGHT_GREEN}Created event: {state['calendar'].event_result}{Colors.END}"
+        
+        elif state['calendar'] and state['calendar'].error:
+            output += f"{Colors.RED}Error occured {state['calendar'].error}{Colors.END}"
+        stream_print(output)
+        return
     elif state['task_type'] and state['task_type'].task == 'search':
         if 'search' in state and state['search'] and state['search'].get('final_response'):
-            output = f"""
+            output += f"""
 {Colors.LIGHT_CYAN}Search Results:{Colors.END}
 {state['search']['final_response']}\n"""
+
     smart_output(output, color=Colors.LIGHT_CYAN)
-    # return output
 
 # %%
 
@@ -2046,6 +2139,7 @@ Type {Colors.LIGHT_GREEN}'help'{Colors.END} for usage guide or start with a comm
             stream_print("\nOperation cancelled.\n", color=Colors.LIGHT_RED)
             continue
         except Exception as e:
+            logger.debug(f"Error in processing: {str(e)}")
             stream_print(f"\nError: {str(e)}\n")
             continue
 
